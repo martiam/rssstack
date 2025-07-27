@@ -1,0 +1,88 @@
+services:
+  # ── TRAEFIK ──────────────────────────────────────────────
+  traefik:
+    image: traefik:v3.4
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --api.insecure=true
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.buypass.acme.tlschallenge=true
+      - --certificatesresolvers.buypass.acme.email=turbixfifty@gmail.com
+      - --certificatesresolvers.buypass.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.buypass.acme.caserver=https://api.buypass.com/acme/directory   # ← Buypass CA
+      - --certificatesresolvers.buypass.acme.httpchallenge=true
+      - --certificatesresolvers.buypass.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    networks: [internal]
+    restart: unless-stopped
+
+  # ── RSSHUB (generator) ──────────────────────────────────
+  rsshub:
+    image: diygod/rsshub:latest
+    env_file: ./shared/auth.env
+    environment:
+      - CACHE_EXPIRE=${CACHE_EXPIRE}
+      - ACCESS_KEY=${ACCESS_KEY}
+      - NODE_ENV=production
+    volumes:
+      - ./shared/auth.env:/app/auth.env:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.rss.rule=Host(`504e1826.host.njalla.net`) && PathPrefix(`/rss`)
+      - traefik.http.routers.rss.entrypoints=websecure
+      - traefik.http.routers.rss.tls.certresolver=buypass
+      - traefik.http.middlewares.rss-strip.stripprefix.prefixes=/rss,/rss/
+      - traefik.http.routers.rss.middlewares=rss-strip
+    networks: [internal]
+    restart: unless-stopped
+
+  # ── FRESHRSS (archive + reader) ──────────────────────────
+  freshrss:
+    image: freshrss/freshrss:latest
+    environment:
+      - CRON_MIN=*/20                      # fetch feeds every 20 min
+    volumes:
+      - freshrssdata:/var/www/FreshRSS/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.feed.rule=Host(`504e1826.host.njalla.net`) && PathPrefix(`/feed`)
+      - traefik.http.routers.feed.entrypoints=websecure
+      - traefik.http.routers.feed.tls.certresolver=buypass
+      - traefik.http.middlewares.feed-strip.stripprefix.prefixes=/feed,/feed/
+      - traefik.http.routers.feed.middlewares=feed-strip
+    networks: [internal]
+    restart: unless-stopped
+
+  # ── COOKIE-BOT (Playwright, nightly login) ───────────────
+  cookiebot:
+    build:
+      context: ./cookiebot
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - RSS_ENV=/opt/rssstack/.env         # file we will rewrite
+      - RSS_CONTAINER=rssstack-rsshub-1
+      - AUTH_FILE=/shared/auth.env
+    volumes:
+      - ./.env:/opt/rssstack/.env
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ~/.Xauthority:/root/.Xauthority:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/rssstack:/opt/rssstack
+      - .:/opt/rssstack
+      - ./shared:/shared
+    networks: [internal]
+    restart: unless-stopped
+
+networks:
+  internal:
+
+volumes:
+  freshrssdata: {}
